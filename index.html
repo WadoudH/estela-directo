@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="strict-origin">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#F4F2EC" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#090A0E" media="(prefers-color-scheme: dark)">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://tile.openstreetmap.org; connect-src wss://broker.hivemq.com:8884 wss://broker.emqx.io:8084 wss://test.mosquitto.org:8081">
+<title>Ubicación en directo</title>
+<link rel="stylesheet" href="leaflet.css">
+<style>
+  :root {
+    --bg: #F4F2EC; --surface: #FFFDF8; --ink: #17181C; --dim: rgba(23, 24, 28, .55);
+    --accent: #7860A3; --live: #B2413B; --good: #3B7D3A; --warn: #B8660F; --route: #2A78D6;
+    --line: rgba(120, 96, 163, .28);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #090A0E; --surface: #14161C; --ink: #F1EFF5; --dim: rgba(241, 239, 245, .55);
+      --accent: #C3A7E4; --live: #EE8D86; --good: #8CC98A; --warn: #F0A95A; --route: #3987E5;
+      --line: rgba(195, 167, 228, .28);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 14px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    -webkit-text-size-adjust: 100%;
+  }
+  #map { position: fixed; inset: 0; background: var(--bg); }
+  .leaflet-container { font: inherit; background: var(--bg); }
+  @media (prefers-color-scheme: dark) {
+    .leaflet-tile-pane { filter: brightness(.82) saturate(.85); }
+  }
+  .leaflet-control-attribution { font-size: 9px; background: color-mix(in srgb, var(--surface) 80%, transparent) !important; color: var(--dim); }
+  .leaflet-control-attribution a { color: var(--dim); }
+
+  #card {
+    position: fixed; z-index: 1000;
+    left: max(10px, env(safe-area-inset-left)); right: max(10px, env(safe-area-inset-right));
+    bottom: max(10px, env(safe-area-inset-bottom));
+    max-width: 460px; margin: 0 auto; padding: 14px 16px;
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+    border: 1px solid var(--line); border-radius: 14px;
+    box-shadow: 0 6px 28px rgba(0, 0, 0, .22);
+  }
+  #head { display: flex; align-items: center; gap: 10px; }
+  #dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--dim); }
+  #card[data-state="live"] #dot { background: var(--live); animation: beat 1.6s ease-in-out infinite; }
+  #card[data-state="stale"] #dot { background: var(--warn); }
+  @keyframes beat { 50% { opacity: .35; transform: scale(.8); } }
+  #name { flex: 1; min-width: 0; font-weight: 800; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #status { margin-top: 2px; font-size: 11px; color: var(--dim); }
+  #figures { display: flex; gap: 18px; margin-top: 12px; flex-wrap: wrap; }
+  #figures:empty { display: none; }
+  .figure small { display: block; font-size: 9px; font-weight: 700; letter-spacing: .14em; color: var(--dim); text-transform: uppercase; }
+  .figure b { font-size: 19px; font-weight: 900; color: var(--accent); font-variant-numeric: tabular-nums; }
+  .figure.to b { color: var(--route); }
+  #actions { display: flex; gap: 8px; margin-top: 12px; }
+  #actions:empty { display: none; }
+  button, a.button {
+    flex: 1; min-height: 40px; padding: 8px 10px; border-radius: 8px;
+    font: inherit; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-align: center; text-decoration: none;
+    color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent);
+    border: 1px solid var(--line); cursor: pointer; -webkit-tap-highlight-color: transparent;
+    display: flex; align-items: center; justify-content: center;
+  }
+  button[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+  button:focus-visible, a.button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #note { margin: 10px 0 0; font-size: 11px; color: var(--dim); }
+  #note:empty { display: none; }
+
+  .me { position: relative; width: 26px; height: 26px; }
+  .me i { position: absolute; inset: 5px; border-radius: 50%; background: var(--live); border: 3px solid #fff; box-shadow: 0 1px 6px rgba(0, 0, 0, .45); }
+  .me.stale i { background: #8a8a8a; }
+  .me svg { position: absolute; inset: -9px; width: 44px; height: 44px; fill: var(--live); filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .4)); }
+  .me.stale svg, .me.still svg { display: none; }
+  .flag { width: 22px; height: 22px; border-radius: 50%; background: var(--route); border: 3px solid #fff; box-shadow: 0 1px 6px rgba(0, 0, 0, .45); }
+  .origin { width: 12px; height: 12px; border-radius: 50%; background: #fff; border: 3px solid var(--accent); }
+  @media (prefers-reduced-motion: reduce) { #card[data-state="live"] #dot { animation: none; } }
+</style>
+</head>
+<body>
+<div id="map" aria-label="Mapa con la ubicación en directo"></div>
+<section id="card" data-state="wait" aria-live="polite">
+  <div id="head"><span id="dot"></span><span id="name">Ubicación en directo</span></div>
+  <div id="status">Conectando…</div>
+  <div id="figures"></div>
+  <div id="actions"></div>
+  <p id="note"></p>
+</section>
+
+<script src="leaflet.js"></script>
+<script>
+"use strict";
+// The page for whoever receives a live-sharing link from Estela. Mirrors Sources/EstelaCore/LiveShare.swift
+// in the app: the key travels only in the link's fragment, and everything is decrypted here, in the browser.
+
+const RELAYS = ["wss://broker.hivemq.com:8884/mqtt", "wss://broker.emqx.io:8084/mqtt", "wss://test.mosquitto.org:8081/mqtt"];
+const $ = id => document.getElementById(id);
+const clock = new Intl.DateTimeFormat("es", { hour: "2-digit", minute: "2-digit" });
+
+// MARK: Formatting (same words as the app)
+
+function ago(seconds) {
+  seconds = Math.max(0, Math.round(seconds));
+  if (seconds < 5) return "ahora mismo";
+  if (seconds < 60) return `hace ${seconds} s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `hace ${minutes} min`;
+  return `hace ${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min`;
+}
+function span(seconds) {
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  return minutes >= 60 ? `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min` : `${minutes} min`;
+}
+function metres(value) {
+  if (value < 1000) return `${Math.round(value)} m`;
+  const km = value / 1000;
+  return km >= 100 ? `${Math.round(km)} km` : `${km.toFixed(1).replace(".", ",")} km`;
+}
+
+// MARK: Keys and decryption
+
+function bytesOf(secret) {
+  const text = atob(secret.replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(text, c => c.charCodeAt(0));
+}
+async function derive(secret) {
+  const bytes = bytesOf(secret);
+  if (bytes.length < 16) throw new Error("clave corta");
+  const hash = async label => {
+    const prefix = new TextEncoder().encode(label);
+    const data = new Uint8Array(prefix.length + bytes.length);
+    data.set(prefix);
+    data.set(bytes, prefix.length);
+    return new Uint8Array(await crypto.subtle.digest("SHA-256", data));
+  };
+  const topic = [...(await hash("estela-directo-tema:")).slice(0, 16)].map(b => b.toString(16).padStart(2, "0")).join("");
+  const key = await crypto.subtle.importKey("raw", await hash("estela-directo-clave:"), "AES-GCM", false, ["decrypt"]);
+  return { topic: `estela/${topic}`, key };
+}
+async function open(key, payload) {
+  // Nonce (12 bytes), then ciphertext and tag.
+  const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: payload.slice(0, 12) }, key, payload.slice(12));
+  return JSON.parse(new TextDecoder().decode(plain));
+}
+function polyline(text) {
+  const points = [];
+  let index = 0, lat = 0, lon = 0;
+  const next = () => {
+    let value = 0, shift = 0, chunk;
+    do {
+      if (index >= text.length) return null;
+      chunk = text.charCodeAt(index++) - 63;
+      value |= (chunk & 0x1f) << shift;
+      shift += 5;
+    } while (chunk >= 0x20);
+    return value & 1 ? ~(value >> 1) : value >> 1;
+  };
+  for (;;) {
+    const dLat = next(), dLon = next();
+    if (dLat === null || dLon === null) break;
+    lat += dLat;
+    lon += dLon;
+    points.push([lat / 1e5, lon / 1e5]);
+  }
+  return points;
+}
+
+// MARK: Relays (just enough MQTT 3.1.1 to subscribe)
+
+function field(text) {
+  const bytes = new TextEncoder().encode(text);
+  return [bytes.length >> 8, bytes.length & 255, ...bytes];
+}
+function packet(header, body) {
+  const size = [];
+  let length = body.length;
+  do {
+    let digit = length % 128;
+    length = Math.floor(length / 128);
+    if (length > 0) digit |= 128;
+    size.push(digit);
+  } while (length > 0);
+  return Uint8Array.from([header, ...size, ...body]);
+}
+
+class Relay {
+  constructor(url, topics, onMessage, onState) {
+    Object.assign(this, { url, topics, onMessage, onState, failures: 0, up: false });
+    this.connect();
+  }
+  connect() {
+    clearTimeout(this.timer);
+    let socket;
+    try { socket = new WebSocket(this.url, ["mqtt"]); } catch { return this.retry(); }
+    this.socket = socket;
+    socket.binaryType = "arraybuffer";
+    let buffer = new Uint8Array(0);
+    socket.onopen = () => socket.send(packet(0x10, [...field("MQTT"), 4, 2, 0, 60, ...field("v" + Math.random().toString(36).slice(2, 14))]));
+    socket.onmessage = event => {
+      const chunk = new Uint8Array(event.data), joined = new Uint8Array(buffer.length + chunk.length);
+      joined.set(buffer);
+      joined.set(chunk, buffer.length);
+      buffer = joined;
+      // A frame may hold several packets, or part of one.
+      for (;;) {
+        if (buffer.length < 2) return;
+        let length = 0, shift = 0, at = 1, digit;
+        do {
+          if (at >= buffer.length) return;
+          digit = buffer[at++];
+          length |= (digit & 127) << shift;
+          shift += 7;
+        } while (digit & 128);
+        if (buffer.length < at + length) return;
+        this.handle(socket, buffer[0], buffer.slice(at, at + length));
+        buffer = buffer.slice(at + length);
+      }
+    };
+    socket.onclose = () => { if (this.socket === socket) this.retry(); };
+    socket.onerror = () => socket.close();
+  }
+  handle(socket, header, body) {
+    const type = header >> 4;
+    if (type === 2) {
+      if (body[1] !== 0) return socket.close();
+      this.failures = 0;
+      this.up = true;
+      this.onState();
+      socket.send(packet(0x82, [0, 1, ...this.topics.flatMap(topic => [...field(topic), 0])]));
+      clearInterval(this.pinger);
+      this.pinger = setInterval(() => { if (socket.readyState === 1) socket.send(Uint8Array.from([0xc0, 0])); }, 30000);
+    } else if (type === 3) {
+      const size = body[0] << 8 | body[1];
+      const topic = new TextDecoder().decode(body.slice(2, 2 + size));
+      // QoS 0 subscription: no packet id before the payload.
+      const skip = (header & 6) ? 2 : 0;
+      this.onMessage(topic, body.slice(2 + size + skip));
+    }
+  }
+  retry() {
+    clearInterval(this.pinger);
+    this.socket = null;
+    this.up = false;
+    this.onState();
+    this.failures += 1;
+    this.timer = setTimeout(() => this.connect(), Math.min(30000, 1000 * 2 ** Math.min(this.failures, 5)));
+  }
+  wake() { if (!this.socket) { this.failures = 0; this.connect(); } }
+}
+
+// MARK: Map
+
+const dark = matchMedia("(prefers-color-scheme: dark)");
+const map = L.map("map", { zoomControl: false, attributionControl: true }).setView([42.54, 1.6], 10);
+map.attributionControl.setPrefix("");
+// OpenStreetMap's own tiles: no key, no account. At night the same tiles are dimmed in CSS: inverted they turn to mud.
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19, attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+}).addTo(map);
+dark.addEventListener("change", () => restyle());
+
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const ahead = L.polyline([], { weight: 5, opacity: .75, dashArray: "2 10", lineCap: "round" }).addTo(map);
+const behind = L.polyline([], { weight: 5, opacity: .95, lineCap: "round", lineJoin: "round" }).addTo(map);
+function restyle() {
+  ahead.setStyle({ color: css("--route") });
+  behind.setStyle({ color: css("--accent") });
+}
+restyle();
+let me, flag, origin;
+
+// MARK: State
+
+let position = null, trail = null, extra = [], following = true, fitted = false, relays = [], keys = null;
+
+function setFollowing(on) {
+  following = on;
+  const button = $("follow");
+  if (button) button.setAttribute("aria-pressed", String(on));
+  if (on && position && position.lat != null) map.setView([position.lat, position.lon], Math.max(map.getZoom(), 15), { animate: true });
+}
+map.on("dragstart", () => setFollowing(false));
+
+function drawTrail() {
+  const path = trail ? polyline(trail.path) : [];
+  // Positions that arrived after the last full path: the line keeps growing between two of them.
+  const line = path.concat(extra.map(p => [p.lat, p.lon]));
+  behind.setLatLngs(line);
+  ahead.setLatLngs(trail && trail.route ? polyline(trail.route) : []);
+  if (line.length) {
+    if (!origin) origin = L.marker(line[0], { icon: L.divIcon({ className: "", html: '<div class="origin"></div>', iconSize: [12, 12] }), interactive: false, keyboard: false }).addTo(map);
+    origin.setLatLng(line[0]);
+  } else if (origin) { origin.remove(); origin = null; }
+}
+
+function render() {
+  const card = $("card"), now = Date.now() / 1000;
+  $("name").textContent = position && position.name ? position.name : "Ubicación en directo";
+  document.title = position && position.name ? `${position.name} · en directo` : "Ubicación en directo";
+  const figures = $("figures"), actions = $("actions");
+  const figure = (label, value, kind = "") => {
+    const box = document.createElement("div"), small = document.createElement("small"), bold = document.createElement("b");
+    box.className = `figure ${kind}`;
+    small.textContent = label;
+    bold.textContent = value;
+    box.append(small, bold);
+    figures.append(box);
+  };
+  figures.replaceChildren();
+
+  if (!position) {
+    card.dataset.state = "wait";
+    $("status").textContent = relays.some(r => r.up) ? "Esperando la primera posición…" : "Conectando…";
+    $("note").textContent = relays.some(r => r.up) ? "Si no aparece nada, puede que el enlace sea antiguo o que aún no se haya empezado a compartir." : "";
+    actions.replaceChildren();
+    return;
+  }
+  const expired = position.expires && now > position.expires + 60;
+  if (position.state === "ended" || expired || position.lat == null) {
+    card.dataset.state = "ended";
+    $("status").textContent = position.state === "ended" || expired ? "Ha dejado de compartir su ubicación." : "Esperando la primera posición…";
+    $("note").textContent = position.state === "ended" || expired ? `Terminó ${ago(now - position.updated)}. Este enlace ya no enseña nada.` : "";
+    actions.replaceChildren();
+    [me, flag, origin].forEach(marker => marker && marker.remove());
+    me = flag = origin = null;
+    behind.setLatLngs([]);
+    ahead.setLatLngs([]);
+    return;
+  }
+
+  // "updated" says the phone is still talking; "fixed" says when it last knew where it was.
+  const silent = now - position.updated, stale = silent > 90;
+  const moving = !stale && (position.speed || 0) > 0.7;
+  card.dataset.state = stale ? "stale" : "live";
+  const how = position.mode === "walk" ? "A pie" : "En coche";
+  $("status").textContent = stale
+    ? `Sin señal ${ago(silent).replace("hace ", "desde hace ")}. Última posición conocida.`
+    : `${moving ? how : "Parado"} · actualizado ${ago(silent)}`;
+  const old = position.fixed && now - position.fixed > 60 && !stale;
+  $("note").textContent = old ? `Sin GPS ${ago(now - position.fixed).replace("hace ", "desde hace ")} (túnel o interior): la posición es la última conocida.`
+    : position.expires ? `Comparte hasta las ${clock.format(new Date(position.expires * 1000))}.` : "";
+
+  if (!stale) figure("Velocidad", moving ? `${Math.round(position.speed * 3.6)} km/h` : "0 km/h");
+  if (position.dest && !stale) {
+    figure("Llega a las", clock.format(new Date(position.dest.eta * 1000)), "to");
+    figure("Le quedan", `${span(position.dest.eta - now)} · ${metres(position.dest.left)}`, "to");
+  }
+  if (position.dest) $("status").textContent += ` · va a ${position.dest.name}`;
+
+  const here = [position.lat, position.lon];
+  const html = `<div class="me${stale ? " stale" : ""}${moving && position.course != null ? "" : " still"}">` +
+    `<svg viewBox="0 0 44 44" style="transform:rotate(${Number(position.course) || 0}deg)"><path d="M22 2l7 10H15z"/></svg><i></i></div>`;
+  const icon = L.divIcon({ className: "", html, iconSize: [26, 26] });
+  if (!me) me = L.marker(here, { icon, zIndexOffset: 1000, keyboard: false, interactive: false }).addTo(map);
+  me.setLatLng(here).setIcon(icon);
+  if (position.dest) {
+    const there = [position.dest.lat, position.dest.lon];
+    if (!flag) flag = L.marker(there, { icon: L.divIcon({ className: "", html: '<div class="flag"></div>', iconSize: [22, 22] }), keyboard: false }).addTo(map);
+    flag.setLatLng(there).bindTooltip(position.dest.name);
+  } else if (flag) { flag.remove(); flag = null; }
+
+  if (!actions.children.length) {
+    const follow = document.createElement("button");
+    follow.id = "follow";
+    follow.type = "button";
+    follow.textContent = "SEGUIR";
+    follow.setAttribute("aria-pressed", String(following));
+    follow.onclick = () => setFollowing(!following);
+    const all = document.createElement("button");
+    all.type = "button";
+    all.textContent = "VER TODO";
+    all.onclick = () => {
+      setFollowing(false);
+      const bounds = L.latLngBounds([[position.lat, position.lon]]).extend(behind.getBounds()).extend(ahead.getBounds());
+      map.fitBounds(bounds, { paddingTopLeft: [30, 30], paddingBottomRight: [30, $("card").offsetHeight + 40], maxZoom: 16 });
+    };
+    const maps = document.createElement("a");
+    maps.id = "maps";
+    maps.className = "button";
+    maps.textContent = "ABRIR EN MAPAS";
+    maps.rel = "noopener";
+    actions.append(follow, all, maps);
+  }
+  // Apple Maps on an Apple device; its web version anywhere else.
+  $("maps").href = `https://maps.apple.com/?ll=${position.lat},${position.lon}&q=${encodeURIComponent(position.name || "Ubicación en directo")}&z=15`;
+
+  if (!fitted) {
+    fitted = true;
+    map.setView(here, 15, { animate: false });
+  } else if (following) {
+    map.panTo(here, { animate: true, duration: .8 });
+  }
+}
+
+async function received(topic, payload) {
+  let message;
+  try { message = await open(keys.key, payload); } catch { return; }
+  if (!message || typeof message.updated !== "number") return;
+  if (topic.endsWith("/p")) {
+    // Three relays carry the same messages: only a newer one counts.
+    if (position && message.updated <= position.updated) return;
+    position = message;
+    if (message.lat != null && (!trail || (message.fixed || message.updated) > trail.updated)) {
+      const last = extra[extra.length - 1];
+      if (!last || last.lat !== message.lat || last.lon !== message.lon) extra.push({ lat: message.lat, lon: message.lon, at: message.fixed || message.updated });
+    }
+  } else if (topic.endsWith("/t")) {
+    if (trail && message.updated <= trail.updated) return;
+    trail = message;
+    extra = extra.filter(p => p.at > trail.updated);
+  }
+  drawTrail();
+  render();
+}
+
+async function begin() {
+  const secret = location.hash.slice(1);
+  if (!secret) {
+    $("status").textContent = "A este enlace le falta la clave.";
+    $("note").textContent = "Abre el enlace completo que te han enviado, tal cual: la parte que va después de # es la que permite ver la ubicación.";
+    return;
+  }
+  if (!window.crypto || !crypto.subtle) {
+    $("status").textContent = "Este navegador no puede descifrar la ubicación.";
+    $("note").textContent = "Prueba con Safari actualizado.";
+    return;
+  }
+  try { keys = await derive(secret); } catch {
+    $("status").textContent = "El enlace no es válido.";
+    $("note").textContent = "Puede que se haya cortado al copiarlo. Pide que te lo envíen otra vez.";
+    return;
+  }
+  const topics = [`${keys.topic}/p`, `${keys.topic}/t`];
+  relays = RELAYS.map(url => new Relay(url, topics, received, render));
+  setInterval(render, 1000);
+  // A phone that slept drops its sockets: pick them up again when the page comes back.
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) relays.forEach(relay => relay.wake()); });
+  addEventListener("online", () => relays.forEach(relay => relay.wake()));
+  render();
+}
+addEventListener("hashchange", () => location.reload());
+begin();
+</script>
+</body>
+</html>
